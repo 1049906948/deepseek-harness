@@ -13,6 +13,7 @@ description: "详细说明 DeepSeek Harness 中 .agents、.claude、AGENTS.md �
 ## 目录
 
 - [目录关系](#目录关系)
+- [如何触发和读取](#如何触发和读取)
 - [AGENTS.md 与 CLAUDE.md](#agentsmd-与-claudemd)
 - [.agents/skills：可复用技能](#agentsskills可复用技能)
 - [.agents/notes：设计记录](#agentsnotes设计记录)
@@ -53,19 +54,68 @@ description: "详细说明 DeepSeek Harness 中 .agents、.claude、AGENTS.md �
 
 `.claude` 当前没有独立的 `settings`、`commands`、`agents` 或 `hooks` 文件。不能根据目录名称推断本仓库配置了这些功能；文档只记录当前检出中可以验证的文件。
 
+## 如何触发和读取
+
+先判断文件类型：技能按任务调用，工作区指令按适用目录加载，设计记录和辅助资料按需读取。发现一个技能通常只把名称和描述放入可用目录；真正选用它后，agent 才读取完整 `SKILL.md`。读取技能也不会自动执行其中的所有脚本。
+
+| 文件 | 读取或调用时机 | 可以怎样提出要求 |
+|---|---|---|
+| `.agents/skills/<name>/SKILL.md` | 用户明确指定技能，或 agent 判断任务符合描述与调用策略时。 | “请使用 `dsh-doc-writing`，帮我写一篇项目启动指南。” |
+| `.agents/notes/**/AGENTS.md` | 工作涉及该目录时，按客户端或 DSH 的指令加载机制读取。 | “修改已实现记录前，请先遵循 `.agents/notes/implemented/AGENTS.md`。” |
+| `.agents/notes/{proposed,implemented,rejected}/...` | 任务需要设计背景、已有决定或否决理由时搜索并读取。 | “先查找 Session 投影相关的活跃 Agent Note，再解释当前设计。” |
+| `.agents/notes/archived/...` | 明确需要历史背景时只读查阅，不作为当前行为依据。 | “请只读说明这条归档记录的历史理由，并用当前代码核对现状。” |
+| 技能中的 `references/`、`templates/` | 技能正文要求、任务需要，或用户明确指定时按需读取。 | “请按照 `dsh-doc-writing` 的 package-library 模板写 README。” |
+| 技能中的 `scripts/` | 技能流程需要执行该脚本且操作在任务授权范围内时。 | 先说明要完成的任务，再由 agent 按技能选择脚本。 |
+| `*.i18n.yaml`、归档 `manifest.json`、`.gitignore` | 对应验证器或 Git 读取。 | 它们是数据和配置文件，没有独立的聊天触发命令。 |
+
+### 在 Codex 对话中指定技能
+
+在已经发现仓库技能的 Codex 会话中，可以直接发下面任意一种请求。技能名后面应写清楚要完成的任务；不必粘贴整个文件。
+
+```text
+请使用 dsh-doc-writing，在 ck-docs 写一篇项目启动指南。
+请使用 dsh-ci-test-reliability，分析这个测试为何只在 CI 偶发失败。
+请使用 dsh-code-review，审查我指定的 PR。
+请先读取 .agents/skills/dsh-responsive-ui/SKILL.md，再调整这个页面的移动端布局。
+```
+
+Codex CLI 和 IDE 扩展还支持在输入中用 `$技能名` 明确提及技能，或用 `/skills` 选择技能，例如 `$dsh-doc-writing 帮我写项目启动指南`。普通任务也可能根据技能的 `description` 自动匹配；需要确定使用哪一个时，直接写出技能名。具体入口见 [OpenAI 官方技能说明](https://learn.chatgpt.com/docs/build-skills#how-chatgpt-and-codex-use-skills)。
+
+### 在 DSH 应用中使用 `/name`
+
+DSH 的确定性用户调用入口是直接用户消息中的 `/技能名`。前提是 profile 加载了技能注册表、本地文件提供方和 `dsh-tool-skill`，且该技能已被发现并允许用户调用。默认本地提供方扫描项目根目录的 `.agents/skills`；解析和调用规则分别由 [skill-filesystem](../packages/skill/skill-filesystem/README.zh.md#use-this-package) 和 [tool-skill](../packages/skill/tool-skill/README.zh.md#use-this-package) 维护。
+
+```text
+/dsh-doc-writing 帮我写一篇项目启动指南。
+请使用 /dsh-ci-test-reliability 分析这个 CI 失败。
+/dsh-translate-docs 翻译我指定的文档，并更新对应的一致性记录。
+```
+
+`/name` 可以出现在句首或句中，前后需要空白或消息边界。因此 `/dsh-doc-writing 帮我写文档` 可以识别，`/dsh-doc-writing帮我写文档` 和 `.agents/skills/dsh-doc-writing/SKILL.md` 都不是这个调用 token。未知名称或用户不可调用的名称保持为普通文本，不会产生技能注入。
+
+DSH 模型也可以根据技能目录选择适用技能，再通过 `skill` 工具按精确名称加载正文；这是模型选择路径，不是用户斜杠指令路径。
+
+### 调用限制和未触发时的检查
+
+技能的触发需要同时符合客户端的调用策略和技能正文。DSH 读取 `SKILL.md` 的 `disable-model-invocation`、`user-invocable`；Codex 的 `agents/openai.yaml` 可通过 `policy.allow_implicit_invocation: false` 禁止隐式选择，保留显式调用。两种机制不能混作同一个字段。
+
+`dsh-translate-docs` 要求用户明确调用；在 DSH 中，`disable-model-invocation: true` 使它不进入模型目录，需由用户输入 `/dsh-translate-docs`。`dsh-pr-description` 则声明 `user-invocable: false`，因此在 DSH 中不能用 `/dsh-pr-description` 确定性加载；创建或更新 PR 描述的任务仍可由模型选用它。
+
+如果没有触发，先确认当前使用的是 Codex 还是 DSH，再确认工作目录属于这个仓库、技能名称正确、文件已经进入可用目录、frontmatter 有效，以及任务符合调用限制。DSH 在缺少必要插件、名称未知或用户调用被禁用时不会注入技能；Codex 的发现和刷新说明见同一份 [官方文档](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)。
+
 ## `AGENTS.md` 与 `CLAUDE.md`
 
 ### 文件角色
 
 `AGENTS.md` 是真实维护文件，承担某个目录范围内的工作指令。根文件规定仓库布局、应用启动约束、包边界、类型安全、Session 数据、文档、测试、错误处理和发布前检查等长期规则；更具体目录中的 `AGENTS.md` 只补充该子树的规则。
 
-`CLAUDE.md` 在本仓库中是兼容入口。根目录、`packages/` 和 `.agents/notes/implemented/` 的 `CLAUDE.md` 都是指向同级或父级 `AGENTS.md` 的符号链接，内容不应作为另一份独立规则维护。修改这些位置时，编辑真实的 `AGENTS.md`，不要把符号链接替换成复制文件。
+`CLAUDE.md` 在本仓库中是兼容入口。根目录、`packages/` 和 `.agents/notes/implemented/` 的 `CLAUDE.md` 都是指向同目录 `AGENTS.md` 的符号链接，内容不应作为另一份独立规则维护。修改这些位置时，编辑真实的 `AGENTS.md`，不要把符号链接替换成复制文件。
 
 ### 指令加载候选
 
 `packages/context/agent-instructions/README.zh.md` 记录了 DSH 的指令加载行为。默认基础候选是 `AGENTS.md` 和 `CLAUDE.md`，本地叠加候选是 `AGENTS.local.md` 和 `CLAUDE.local.md`；项目指令按项目根目录到当前工作目录的顺序组成，越具体的目录优先级越高。
 
-同一候选组内，去除首尾空白后内容相同的文件只渲染一次。因此当前检出中由 `CLAUDE.md` 复制的 `AGENTS.md` 不会让模型看到两份相同规则。文件加载、变更和移除的具体时机由 `dsh-agent-instructions` 包负责；本仓库的符号链接只表达共享内容，不单独证明任何外部客户端的自动发现行为。
+同一候选组内，去除首尾空白后内容相同的文件只渲染一次。因此当前检出中指向同一文件的 `AGENTS.md` 和 `CLAUDE.md` 不会让模型看到两份相同规则。文件加载、变更和移除的具体时机由 `dsh-agent-instructions` 包负责；本仓库的符号链接只表达共享内容，不单独证明任何外部客户端的自动发现行为。
 
 指令文件是模型工作上下文的一部分，内容应写成短而稳定的行为规则，并链接到详细文档。产品行为、包 API、配置字段和完整设计理由应由源码、包 README、`docs/` 或 Agent Note 承担，不能把根 `AGENTS.md` 写成项目百科全书。
 
@@ -131,9 +181,9 @@ description: "详细说明 DeepSeek Harness 中 .agents、.claude、AGENTS.md �
 
 ### 三联文件
 
-一个双语 Agent Note 通常由 `.md`、`.zh.md` 和 `.i18n.yaml` 三个同名文件组成。`.md` 和 `.zh.md` 是等权正文，`.i18n.yaml` 保存每个标题段落的已确认一致性哈希；新增、修改、移动和删除时必须一起处理。中文正文保留机器检查所需的 `# Agent Note:` 和 `Status:` 等英文头部标记。
+一个双语 Agent Note 由 `.md`、`.zh.md` 和 `.i18n.yaml` 三个同名文件组成。`.md` 和 `.zh.md` 是等权正文，`.i18n.yaml` 保存每个标题段落的已确认一致性哈希；新增、修改、移动和删除时必须一起处理。中文正文保留机器检查所需的 `# Agent Note:` 和 `Status:` 等英文头部标记。
 
-所有活跃记录都从 `## Problem` 开始，并需要 `## Alternatives considered`。`proposed/` 还需要 `Proposal`、`Acceptance criteria` 和 `Risks`；`implemented/` 使用现在时的 `Decision` 和 `Consequences`，不能继续保留 `Proposal`、`Plan`、`Migration plan` 或 `Acceptance criteria` 等提案章节。
+所有活跃记录的正文都从 `## Problem` 开始，并记录真实的 `## Alternatives considered`；格式规范允许符合条件的早期记录使用指定的缺失说明，不能凭空补造备选方案。`proposed/` 还需要 `Proposal`、`Acceptance criteria` 和 `Risks`；`implemented/` 使用现在时的 `Decision` 和 `Consequences`，不能继续保留 `Proposal`、`Plan`、`Migration plan` 或 `Acceptance criteria` 等提案章节。
 
 ### 代表记录
 
@@ -150,7 +200,7 @@ description: "详细说明 DeepSeek Harness 中 .agents、.claude、AGENTS.md �
 
 ### 归档规则
 
-新增 Agent Note 前，先在活跃树中搜索同一决策或机制，判断新记录是否完全或部分替代旧记录。已有记录完全被替代时才可按规则合并或归档；部分替代的记录要保留并互相链接。小型 UI 调整和纯机械修改通常不需要新增 Agent Note。
+新增 Agent Note 前，先在活跃树中搜索同一决策或机制，判断新记录是否完全或部分替代旧记录。完全替代的旧记录只有在新记录保留其全部独有理由、备选方案、后果和验证要求后才能合并删除；部分替代的记录要保留并互相链接。归档根据记录是否仍能指导未来决策评估，具体条件以 [Agent Note 规则](../.agents/notes/README.md#archiving-and-deletion)为准。小型 UI 调整和纯机械修改通常不需要新增 Agent Note。
 
 归档只接收已实现记录，并将文件移动到 `archived/{class}/...`，保留 `Status: implemented`，在两种语言中加入相同的 `Archived: YYYY-MM-DD`，然后更新 sidecar 和封存清单。归档后不得编辑、翻译、格式化、移动、删除正文或修复出站链接；`.agents/notes/archived/manifest.json` 保存封存文件的哈希。
 
@@ -185,9 +235,7 @@ pnpm run test:docs
 pnpm run doc-sync
 ```
 
-`test:docs` 是快速文档检查集合；`doc-sync` 是完整文档同步集合，包含 Agent Note、技能调用元数据、双语配对、Markdown 链接与换行等检查。若只修改本文件，可先运行 `pnpm run verify-md-links`；提交前按 [dsh-pre-push-checks](../.agents/skills/dsh-pre-push-checks/SKILL.md) 选择覆盖实际 diff 的最小充分检查。
-
-本次检查中已执行 `pnpm run test:docs`，但当前沙箱禁止 `tsx` 在临时目录创建 IPC 管道，命令因 `listen EPERM` 退出；该环境限制尚未证明文档内容有错误。新增文件的链接目标已按仓库路径逐一核对。
+`test:docs` 是快速文档检查集合；`doc-sync` 是完整文档同步集合，包含 Agent Note、技能调用元数据、双语配对、Markdown 链接与换行等检查。各检查的默认扫描范围由对应脚本维护；`ck-docs/` 不在 `verify-md-links` 的默认范围内，需要额外对本文件调用该脚本导出的 `findViolations` 检查链接和锚点。提交前按 [dsh-pre-push-checks](../.agents/skills/dsh-pre-push-checks/SKILL.md) 选择覆盖实际 diff 的最小充分检查。
 
 ## 延伸阅读
 
