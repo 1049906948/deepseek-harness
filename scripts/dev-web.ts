@@ -1,42 +1,38 @@
 /**
- * The Web development loop: build once, serve through `dsh web`, and keep every
- * browser-side artifact rebuilt on source edits, in one terminal.
+ * Web 开发循环：在一个终端中完成首次构建，通过 `dsh web` 提供服务，
+ * 并在源码变动时持续重建所有浏览器端产物。
  *
- * Stages, in order: `pnpm run build:artifacts` (skipped by `--skip-build`), three
- * long-lived watchers, then `dsh web` (skipped by `--no-serve`). The watchers
- * exist because the compile shell links built lib products rather than
- * sources: `tsc -b tsconfig.client.json --watch` emits `lib/types` (the tsdown
- * lib entries are that emit, not `src`), tsdown watch bundles `lib/index.js`
- * and `lib/client.js`, and `vite build --watch` rewrites `apps/web/dist`, which
- * `dsh web` serves. A missing watcher does not fail — it silently shows the
- * previous artifact, so an edit appears to do nothing; any stage exiting on its
- * own therefore stops the loop with exit code 1.
+ * 各阶段依次为：`pnpm run build:artifacts`（可用 `--skip-build` 跳过）、
+ * 三个持续运行的监听器，最后是 `dsh web`（可用 `--no-serve` 跳过）。
+ * 需要这些监听器，是因为应用壳链接的是构建后的 lib 产物，而非源码：
+ * `tsc -b tsconfig.client.json --watch` 输出 `lib/types`（tsdown 的 lib 入口
+ * 使用该输出，而非 `src`），tsdown watch 打包 `lib/index.js` 和 `lib/client.js`，
+ * `vite build --watch` 则重写由 `dsh web` 提供的 `apps/web/dist`。
+ * 缺少监听器不会报错，页面会继续使用旧产物，使源码修改看起来没有生效；
+ * 因此，任一阶段自行退出时，整个循环都会以退出码 1 结束。
  *
- * Reload signaling is not this script's business — the host webserver
- * stat-polls the bundles it serves and broadcasts `rebuilt` frames itself, so
- * any process that rewrites `lib/client.js` files triggers reloads.
+ * 重载通知由 Host 的 Web 服务负责：它轮询所提供 bundle 的文件状态，
+ * 并广播 `rebuilt` 帧。因此，任何进程重写 `lib/client.js` 都会触发重载。
  *
- * MUST NOT run beside `pnpm run build` or `build:artifacts`: they write the same `lib/` and
- * `apps/web/dist/` trees. The build stage here finishes before any watcher starts.
+ * 严禁与 `pnpm run build` 或 `build:artifacts` 同时运行：它们会写入同一组
+ * `lib/` 和 `apps/web/dist/` 目录。本脚本会先完成构建阶段，再启动监听器。
  *
- * Usage: `pnpm run dev:web [--skip-build] [--no-serve] [--poll[=ms]] [dsh web arguments]`.
- * `--skip-build` requires the artifact tree from a prior `build` or `build:artifacts`: every
- * watcher is incremental over the previous stage's output and none of them
- * bootstraps a missing tree. `--no-serve` keeps only the watchers, for a
- * `dsh web` started elsewhere. `--poll` switches the source watchers to polling
- * (default 500ms): network mounts (weka) deliver no inotify events, so native
- * watching sees the initial build only and never a source change. Polling has
- * to reach tsc too — a native-watching tsc never re-emits `lib/types`, which
- * strands the other two stages on stale input.
+ * 用法：`pnpm run dev:web [--skip-build] [--no-serve] [--poll[=ms]] [dsh web 参数]`。
+ * `--skip-build` 要求此前已通过 `build` 或 `build:artifacts` 生成产物目录：
+ * 各监听器都基于上一阶段的输出增量工作，不会自行创建缺失的产物目录。
+ * `--no-serve` 只保留监听器，供在其他位置启动的 `dsh web` 使用。
+ * `--poll` 将源码监听切换为轮询（默认 500ms）：网络挂载（weka）不产生
+ * inotify 事件，原生监听只能完成首次构建，无法感知后续源码变动。
+ * tsc 也必须使用轮询，否则它不会重新输出 `lib/types`，
+ * 后续两个阶段就会一直使用旧输入。
  *
- * Shutdown: Ctrl+C reaches every stage through the terminal's process group, so
- * the script only waits for them and escalates survivors; SIGTERM is addressed
- * to this process alone and is forwarded once. The exit code is 130 after
- * SIGINT, 0 after SIGTERM, and 1 when a stage exited on its own.
+ * 关闭时，Ctrl+C 通过终端进程组到达所有阶段，本脚本只需等待它们退出，
+ * 并对仍未退出的进程逐级升级终止信号；SIGTERM 只发送给本进程，需转发一次。
+ * 收到 SIGINT 后退出码为 130，收到 SIGTERM 后为 0，任一阶段自行退出时为 1。
  *
- * Each package keeps its own tsdown.config.ts untouched: this script layers
- * `watch` through API-level inline config (tsdown workspace mode fills inline
- * keys under each package's file config, and no package config defines it).
+ * 本脚本保留各包的 tsdown.config.ts，通过 API 内联配置补充 `watch`：
+ * tsdown workspace 模式以内联配置补充各包配置文件中未指定的字段，
+ * 而各包配置都未定义 `watch`。
  */
 import { globSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -53,23 +49,23 @@ import { pnpmInvocation } from './pnpm-invocation.ts'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 
-/** Client-face type emit feeding every tsdown lib entry in the watch set. */
+/** 输出 Client 编译面产物，为监听集合中的所有 tsdown lib 入口提供输入。 */
 const CLIENT_TYPE_PROGRAM = 'tsconfig.client.json'
 
-/** Compile-shell workspace whose dist `dsh web` serves. */
+/** 应用壳所属的 workspace 包，其 dist 由 `dsh web` 提供。 */
 const SHELL_PACKAGE = '@deepseek-ai/dsh-web-frontend'
 
 /**
- * Test infrastructure builds through the client preset but never enters the
- * shell's module graph, so it is not a dev-loop artifact.
+ * 测试基础设施使用 client 构建预设，但不进入应用壳的模块图，
+ * 因此不属于开发循环需要重建的产物。
  */
 const TEST_INFRASTRUCTURE_PREFIX = 'packages/test-support/'
 
 /**
- * Sample one local public environment for every long-lived watcher stage.
- * @param root - repository root supplying version and Git metadata.
- * @param environment - watcher launch environment supplying public extensions.
- * @returns process environment shared by tsdown and spawned watcher stages.
+ * 一次性采集本地公开构建环境，供所有持续运行的监听阶段共用。
+ * @param root - 提供版本和 Git 元数据的仓库根目录。
+ * @param environment - 监听器的启动环境，提供额外的公开环境变量。
+ * @returns tsdown 与启动的监听阶段共用的进程环境。
  */
 export function devWebBuildEnvironment(
   root: string,
@@ -78,29 +74,28 @@ export function devWebBuildEnvironment(
   return clientBuildProcessEnvironment(environment, repositoryClientBuildEnvironment(root, environment))
 }
 
-/** Resolved `dev-web` command line: the script's own flags plus the arguments forwarded to `dsh web`. */
+/** 解析后的 `dev-web` 命令行：脚本自身选项，以及转发给 `dsh web` 的参数。 */
 export interface DevWebArguments {
-  /** Skip the `pnpm run build:artifacts` that otherwise precedes the watchers. */
+  /** 跳过默认在监听器启动前执行的 `pnpm run build:artifacts`。 */
   readonly skipBuild: boolean
-  /** Start `dsh web`; false keeps only the rebuild watchers beside an already running server. */
+  /** 是否启动 `dsh web`；为 false 时只保留重建监听器，配合已运行的服务使用。 */
   readonly serve: boolean
-  /** Source-watcher polling interval in milliseconds; undefined selects native watching. */
+  /** 源码监听器的轮询间隔，单位为毫秒；undefined 表示使用原生监听。 */
   readonly pollInterval: number | undefined
-  /** Arguments forwarded verbatim to `dsh web`, in order. */
+  /** 按原顺序原样转发给 `dsh web` 的参数。 */
   readonly appArgs: readonly string[]
 }
 
-/** Polling interval selected by a bare `--poll`. */
+/** 仅传入 `--poll`、未指定数值时使用的轮询间隔。 */
 const DEFAULT_POLL_INTERVAL = 500
 
 /**
- * Parse the script's command line. `--skip-build`, `--no-serve`, and `--poll[=ms]`
- * belong to this script; a bare `--` is dropped; every other token is forwarded
- * to `dsh web`.
- * @param argv - arguments after the script path.
- * @returns the resolved flags and forwarded arguments.
- * @throws Error when `--poll` carries a non-positive or non-integer interval, or
- * when `--no-serve` leaves forwarded arguments without a `dsh web` process.
+ * 解析脚本命令行。`--skip-build`、`--no-serve` 和 `--poll[=ms]` 由本脚本处理；
+ * 独立的 `--` 被丢弃，其余参数全部转发给 `dsh web`。
+ * @param argv - 脚本路径之后的命令行参数。
+ * @returns 解析后的选项与待转发参数。
+ * @throws Error 当 `--poll` 的间隔不是正整数，或指定 `--no-serve` 后仍有
+ * 需要转发给 `dsh web` 进程的参数时抛出。
  */
 export function parseDevWebArguments(argv: readonly string[]): DevWebArguments {
   let skipBuild = false
@@ -108,7 +103,7 @@ export function parseDevWebArguments(argv: readonly string[]): DevWebArguments {
   let pollInterval: number | undefined
   const appArgs: string[] = []
   for (const arg of argv) {
-    // `pnpm run` forwards a `--` separator verbatim; it carries no meaning here.
+    // `pnpm run` 会原样转发 `--` 分隔符，本脚本无需处理该分隔符的语义。
     if (arg === '--') continue
     if (arg === '--skip-build') skipBuild = true
     else if (arg === '--no-serve') serve = false
@@ -124,12 +119,11 @@ export function parseDevWebArguments(argv: readonly string[]): DevWebArguments {
 }
 
 /**
- * Discover the watch workspace by declaration: every packages/<group>/<name>
- * whose package.json carries `dsh.client` with platform "web" is a client
- * plugin bundle emitter. Scanned once at startup — a package added while
- * watching means restarting this script.
- * @param root - repository root containing the grouped package directories.
- * @returns workspace-relative plugin package directories.
+ * 根据声明发现需要监听的 workspace 包：packages/<group>/<name> 下，
+ * package.json 声明 `dsh.client` 且 platform 为 "web" 的包会输出客户端插件 bundle。
+ * 仅在启动时扫描一次，监听期间新增包需要重启本脚本。
+ * @param root - 包含分组包目录的仓库根目录。
+ * @returns 相对于 workspace 根目录的插件包目录。
  */
 export function discoverPluginDirs(root = repoRoot): string[] {
   const dirs: string[] = []
@@ -143,16 +137,13 @@ export function discoverPluginDirs(root = repoRoot): string[] {
 }
 
 /**
- * Discover the statically linked library packages: the other half of the same
- * partition {@link discoverPluginDirs} takes. A package that builds through the
- * client preset without declaring `dsh.client` has no loader-delivered browser
- * half, so the compile shell links its `lib/index.js` instead — and an edit to
- * its source reaches the browser only once that bundle is rewritten. Deriving
- * the set from the build preset rather than a hand list keeps it correct when
- * dependency sections move around; deriving it from `dependencies` would not,
- * because client packages declare their build inputs as devDependencies.
- * @param root - repository root containing the grouped package directories.
- * @returns workspace-relative library package directories.
+ * 发现静态链接的库包，与 {@link discoverPluginDirs} 发现的插件包对应。
+ * 使用 client 构建预设但未声明 `dsh.client` 的包，没有由 Loader 交付的浏览器入口，
+ * 应用壳会直接链接其 `lib/index.js`；源码变动只有在该 bundle 重写后才能到达浏览器。
+ * 根据构建预设推导包集合，可以在依赖声明调整位置时保持正确，无需手工维护名单。
+ * 不能仅根据 `dependencies` 推导，因为客户端包将构建输入声明为 devDependencies。
+ * @param root - 包含分组包目录的仓库根目录。
+ * @returns 相对于 workspace 根目录的库包目录。
  */
 export function discoverLibraryDirs(root = repoRoot): string[] {
   const dirs: string[] = []
@@ -169,11 +160,11 @@ export function discoverLibraryDirs(root = repoRoot): string[] {
 }
 
 /**
- * Start the tsdown watch build used by `pnpm run dev:web`.
- * @param root - repository or fixture root passed to tsdown.
- * @param pluginDirs - workspace-relative package directories to watch.
- * @param pollInterval - optional source-watcher polling interval in milliseconds.
- * @returns live bundles after every watcher has completed its initial build and package-owned post-build hooks.
+ * 启动 `pnpm run dev:web` 使用的 tsdown 监听构建。
+ * @param root - 传给 tsdown 的仓库或测试夹具根目录。
+ * @param pluginDirs - 相对于 workspace 根目录、需要监听的包目录。
+ * @param pollInterval - 可选的源码监听轮询间隔，单位为毫秒。
+ * @returns 所有监听器完成首次构建和包自身的构建后钩子后，返回仍在运行的 bundle。
  */
 export async function watchClientPlugins(
   root: string,
@@ -189,7 +180,7 @@ export async function watchClientPlugins(
     workspace: [...pluginDirs],
     configLoader: 'native',
     watch: true,
-    // Workspace hooks override inline hooks; onSuccess runs after each package's build:done work.
+    // Workspace 钩子会覆盖内联钩子；onSuccess 在各包的 build:done 工作完成后执行。
     onSuccess: (options) => {
       if (initialized.has(options)) return
       initialized.add(options)
@@ -209,43 +200,43 @@ export async function watchClientPlugins(
   return bundles
 }
 
-/** One long-lived stage process as the supervisor observes it. */
+/** 管理器所观察到的单个持续运行阶段进程。 */
 export interface StageHandle {
-  /** Command label used in diagnostics. */
+  /** 诊断信息中使用的命令名称。 */
   readonly name: string
-  /** Settles with the exit code, or null when a signal ended the stage. */
+  /** 阶段退出后，Promise 完成并返回退出码；若由信号终止，则返回 null。 */
   readonly exited: Promise<number | null>
   /**
-   * Deliver one signal; a no-op once the stage has exited.
-   * @param signal - the signal to send.
+   * 发送一次信号；阶段已退出时不执行任何操作。
+   * @param signal - 要发送的信号。
    */
   kill(signal: NodeJS.Signals): void
 }
 
-/** How a requested stop reaches the stages. */
+/** 停止请求向各阶段传递的方式。 */
 export interface StageStop {
-  /** Signal sent to every live stage first; omitted when the terminal already delivered SIGINT to them. */
+  /** 首先发送给各存活阶段的信号；终端已向它们发送 SIGINT 时省略。 */
   readonly signal?: NodeJS.Signals | undefined
-  /** Milliseconds to wait for exits before escalating to SIGTERM, and again before SIGKILL. */
+  /** 升级到 SIGTERM 前及之后升级到 SIGKILL 前，分别等待退出的毫秒数。 */
   readonly graceMs: number
 }
 
 /**
- * Own the live stages: report a stage that exits before a stop was requested,
- * and on a requested stop signal, wait, and escalate until every stage has exited.
+ * 管理存活阶段：报告停止请求前自行退出的阶段；收到停止请求后发送信号、
+ * 等待并逐级升级终止信号，直到所有阶段退出。
  */
 export class StageSupervisor {
   private readonly live = new Set<StageHandle>()
   private stopping = false
 
   /**
-   * @param onStale - receives the stage name and exit code when a stage exits before a stop was requested.
+   * @param onStale - 阶段在收到停止请求前退出时，以阶段名称和退出码调用的回调。
    */
   constructor(private readonly onStale: (stage: string, code: number | null) => void) {}
 
   /**
-   * Track one started stage until it exits.
-   * @param stage - the stage to supervise.
+   * 跟踪一个已启动的阶段，直到它退出。
+   * @param stage - 要管理的阶段。
    */
   add(stage: StageHandle): void {
     this.live.add(stage)
@@ -256,8 +247,8 @@ export class StageSupervisor {
   }
 
   /**
-   * Stop every live stage and resolve once all of them have exited.
-   * @param stop - initial signal and the grace period between escalation steps.
+   * 停止所有存活阶段，并在它们全部退出后完成。
+   * @param stop - 初始信号，以及每次升级终止信号之间的等待时间。
    */
   async stop(stop: StageStop): Promise<void> {
     this.stopping = true
@@ -283,19 +274,18 @@ export class StageSupervisor {
 }
 
 /**
- * Grace period per escalation step. `dsh web` gives its plugin tree five seconds
- * to dispose after the first signal; escalating earlier would turn the graceful
- * drain into a forced exit.
+ * 每次升级终止信号前的等待时间。`dsh web` 在收到首个信号后，
+ * 给插件树五秒钟进行清理；提前升级信号会打断有序清理并强制退出。
  */
 const STOP_GRACE_MS = 6_000
 
 /**
- * Spawn one long-lived stage with inherited stdio and hand it to the supervisor.
- * @param supervisor - owner that reports an unexpected exit and stops the stage on shutdown.
- * @param name - command label used in diagnostics.
- * @param command - executable, resolved from the workspace bins when `local` is set.
- * @param args - command arguments.
- * @param local - whether to resolve `command` from the workspace's installed bins.
+ * 启动一个继承标准输入、输出和错误流的持续运行阶段，并交给管理器。
+ * @param supervisor - 报告意外退出、并在关闭时停止该阶段的管理器。
+ * @param name - 诊断信息中使用的命令名称。
+ * @param command - 可执行文件；设置 `local` 时从 workspace 的可执行文件目录解析。
+ * @param args - 命令参数。
+ * @param local - 是否从 workspace 已安装的可执行文件目录解析 `command`。
  */
 function spawnStage(
   supervisor: StageSupervisor,
@@ -318,10 +308,9 @@ function spawnStage(
 }
 
 /**
- * Build every repository artifact, without the aggregate test and script
- * typechecks, with the launch environment untouched:
- * `scripts/build.ts` samples the public client values itself.
- * @returns the build's exit code, or null when a signal ended it.
+ * 构建全部仓库产物，不执行测试与脚本的聚合类型检查，且不修改启动环境：
+ * `scripts/build.ts` 会自行采集客户端公开构建值。
+ * @returns 构建退出码；若由信号终止，则为 null。
  */
 async function runBuild(): Promise<number | null> {
   const invocation = pnpmInvocation(['run', 'build:artifacts'])
@@ -341,9 +330,8 @@ if (isMain) {
     process.exit(1)
   }
 
-  // Shutdown is requested once, by a terminal signal or by a stage exiting on
-  // its own; `signal` stays unset for SIGINT because the terminal's process
-  // group already delivered it to every stage.
+  // 终端信号或阶段自行退出只会触发一次关闭请求；SIGINT 不设置 `signal`，
+  // 因为终端进程组已经将它发送给所有阶段。
   const shutdown = Promise.withResolvers<number>()
   const requested: { code?: number; signal?: NodeJS.Signals } = {}
   const shutdownRequested = (): boolean => requested.code !== undefined
@@ -357,9 +345,8 @@ if (isMain) {
     console.error(`dev-web: ${stage} exited (code ${String(code)}); stopping the other stages`)
     requestShutdown(1, 'SIGTERM')
   })
-  // Persistent listeners, not `once`: the tsdown watchers bundle signal-exit,
-  // which re-raises a signal whenever it finds no other listener left and would
-  // terminate this process in the middle of the teardown below.
+  // 使用持续监听器而非 `once`：tsdown 监听器内置的 signal-exit
+  // 在发现没有其他监听器时会重新触发信号，导致本进程在下方清理尚未完成时终止。
   process.on('SIGINT', () => { requestShutdown(130, undefined) })
   process.on('SIGTERM', () => { requestShutdown(0, 'SIGTERM') })
 
@@ -391,11 +378,9 @@ if (isMain) {
     process.exit(1)
   }
 
-  // tsc has no polling interval flag, so `--poll` selects its fixed-interval
-  // watchers rather than an interval. Dropping that translation leaves tsc
-  // natively watching on a network mount where inotify never fires: it stops
-  // re-emitting lib/types, and the two later stages then rebuild forever from
-  // stale input without printing anything.
+  // tsc 没有设置轮询间隔的命令行选项，因此 `--poll` 只选择其固定间隔监听模式。
+  // 缺少这一步转换时，tsc 会在不产生 inotify 事件的网络挂载上使用原生监听，
+  // 不再重新输出 lib/types，后续两个阶段就会持续基于旧输入重建，且没有任何提示。
   spawnStage(supervisor, `tsc -b ${CLIENT_TYPE_PROGRAM} --watch`, 'tsc', [
     '-b', CLIENT_TYPE_PROGRAM, '--watch', '--preserveWatchOutput',
     ...options.pollInterval !== undefined
@@ -403,20 +388,15 @@ if (isMain) {
       : [],
   ], true)
 
-  // tsdown's initial builds are awaited before the dist watcher starts so vite's
-  // first build reads current lib bundles rather than whatever the last full
-  // build left. Its own watch then covers later lib rewrites — those files are
-  // in its module graph.
+  // 等待 tsdown 首次构建完成后再启动 dist 监听器，确保 Vite 首次构建读取最新
+  // lib bundle。后续 lib 重写由 Vite 自身的监听覆盖，因为这些文件已在其模块图中。
   const bundles = await watchClientPlugins(repoRoot, [...pluginDirs, ...libraryDirs], options.pollInterval)
   if (!shutdownRequested()) {
-    // Through the shell's own `watch` script rather than vite's API: vite is not a
-    // repository-root dependency, and more importantly the vite root is its
-    // working directory — `resolve.dedupe` resolves react from that root, so
-    // running vite from anywhere but apps/web silently switches which react copy
-    // the bundle gets.
+    // 通过应用壳自身的 `watch` 脚本启动：Vite 不是仓库根目录的依赖，
+    // 更重要的是 Vite 以工作目录为 root，`resolve.dedupe` 从该目录解析 React。
+    // 在 apps/web 之外运行 Vite，会悄然改变 bundle 使用的 React 副本。
     spawnStage(supervisor, 'vite build --watch', 'pnpm', ['--filter', SHELL_PACKAGE, 'run', 'watch'], false)
-    // The same launch vector as the root `dsh` script, so the served Host runs
-    // from source exactly as `pnpm dsh web` would.
+    // 使用与根目录 `dsh` 脚本相同的启动方式，使 Host 像 `pnpm dsh web` 一样从源码运行。
     if (options.serve) {
       spawnStage(supervisor, 'dsh web', process.execPath, [
         '--import', 'tsx/esm', 'apps/cli/src/bin.ts', 'web', ...options.appArgs,
