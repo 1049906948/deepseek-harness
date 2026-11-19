@@ -146,6 +146,7 @@ Host/Client 的类型编译也分开：`tsconfig.host.json` 和 `tsconfig.client
 - [Cordis primer](../docs/cordis-primer.md)：理解插件、服务、事件和效果的基础概念。
 - [Development guide](../docs/development.md)：本仓库的构建、Host/Client 编译面和本地验证流程。
 - [Subsystem index](../docs/subsystems/README.md)：按 Agent、Session、Web Client 等领域深入接口和语义。
+- [apps/web 技术架构](web-architecture.md)：从 Web 启动、插件交付和 Remote 追踪到会话恢复、UI 装配与排查入口。
 
 -----
 

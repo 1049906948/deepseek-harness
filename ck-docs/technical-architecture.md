@@ -746,6 +746,7 @@ Host 控制业务变更、访问策略和持久化；Client 保存用于浏览�
 - [Cordis primer](../docs/cordis-primer.zh.md)：插件、服务、事件和副作用的框架基础。
 - [Agent 生命周期](../docs/agent-lifecycle.zh.md)：从输入到 turn 结束的详细顺序图。
 - [Web Client 架构](../docs/subsystems/web-client.zh.md)：Host API、Client 模型、模块加载和界面组合。
+- [apps/web 技术架构](web-architecture.md)：Web 专题的启动时序、网络通道、会话数据流、构建与排查入口。
 - [Development guide](../docs/development.zh.md)：Host/Client TypeScript 编译面及构建产物流程。
 
 ## 维护备注
