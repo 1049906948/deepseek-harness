@@ -379,6 +379,7 @@ Worker preview 有单独 bootstrap 和构建分区，默认发布的 Web 包排�
 以下资料分别维护总体机制和更细的包级行为，本文作为它们之间的阅读导航。
 
 - [Web Client 架构](../docs/subsystems/web-client.zh.md)：两端所有权、Client 模型、数据通路和重连语义。
+- [Client 代码结构与职责](client-code-structure.md)：`packages/client` 的包地图，以及首页、会话、侧栏和设置源码入口。
 - [Client Modules](../docs/subsystems/client-modules.zh.md)：boot graph、包发现、combo 脚本和模块服务。
 - [API Gateway](../docs/api-gateway.zh.md)：Remote 生成、运行时调用和职责。
 - [WebServer](../docs/subsystems/web-server.zh.md)：路由、upgrade 和 index injection。
